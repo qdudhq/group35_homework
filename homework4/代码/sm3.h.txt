@@ -1,0 +1,23 @@
+#ifndef SM3_H
+#define SM3_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#define SM3_DIGEST_LEN 32
+#define SM3_BLOCK_LEN  64
+
+typedef struct {
+    uint32_t state[8];
+    uint64_t bit_len;
+    uint8_t  buf[SM3_BLOCK_LEN];
+    size_t   buf_len;
+} sm3_ctx_t;
+
+void sm3_init(sm3_ctx_t *ctx);
+void sm3_update(sm3_ctx_t *ctx, const uint8_t *data, size_t len);
+void sm3_final(sm3_ctx_t *ctx, uint8_t digest[SM3_DIGEST_LEN]);
+
+void sm3_compress(uint32_t state[8], const uint8_t block[SM3_BLOCK_LEN]);
+
+#endif

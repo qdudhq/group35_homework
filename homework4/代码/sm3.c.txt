@@ -1,0 +1,66 @@
+#include "sm3.h"
+#include <string.h>
+
+#define ROTL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+#define P0(x)        ((x) ^ ROTL32(x, 9)  ^ ROTL32(x, 17))
+
+static const uint32_t sm3_iv[8] = {
+    0x7380166f, 0x4914b2b9, 0x172442d7, 0xda8a0600,
+    0xa96f30bc, 0x163138aa, 0xe38dee4d, 0xb0fb0e4e
+};
+
+void sm3_init(sm3_ctx_t *ctx)
+{
+    memcpy(ctx->state, sm3_iv, sizeof(sm3_iv));
+    ctx->bit_len = 0;
+    ctx->buf_len = 0;
+    memset(ctx->buf, 0, SM3_BLOCK_LEN);
+}
+
+void sm3_update(sm3_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    size_t i = 0;
+    ctx->bit_len += (uint64_t)len * 8;
+
+    if (ctx->buf_len > 0) {
+        size_t fill = SM3_BLOCK_LEN - ctx->buf_len;
+        if (len < fill) {
+            memcpy(ctx->buf + ctx->buf_len, data, len);
+            ctx->buf_len += len;
+            return;
+        }
+        memcpy(ctx->buf + ctx->buf_len, data, fill);
+        sm3_compress(ctx->state, ctx->buf);
+        i = fill;
+        ctx->buf_len = 0;
+    }
+
+    for (; i + SM3_BLOCK_LEN <= len; i += SM3_BLOCK_LEN) {
+        sm3_compress(ctx->state, data + i);
+    }
+
+    if (i < len) {
+        memcpy(ctx->buf, data + i, len - i);
+        ctx->buf_len = len - i;
+    }
+}
+
+void sm3_final(sm3_ctx_t *ctx, uint8_t digest[SM3_DIGEST_LEN])
+{
+    uint8_t pad[64] = {0x80};
+    size_t pad_bytes = (ctx->buf_len < 56) ? (56 - ctx->buf_len) : (120 - ctx->buf_len);
+    sm3_update(ctx, pad, pad_bytes);
+
+    uint8_t len_buf[8] = {0};
+    for (int i = 0; i < 8; i++) {
+        len_buf[i] = (uint8_t)(ctx->bit_len >> (56 - i * 8));
+    }
+    sm3_update(ctx, len_buf, 8);
+
+    for (int i = 0; i < 8; i++) {
+        digest[i*4 + 0] = (ctx->state[i] >> 24) & 0xFF;
+        digest[i*4 + 1] = (ctx->state[i] >> 16) & 0xFF;
+        digest[i*4 + 2] = (ctx->state[i] >> 8)  & 0xFF;
+        digest[i*4 + 3] = ctx->state[i] & 0xFF;
+    }
+}

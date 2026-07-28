@@ -1,0 +1,122 @@
+#include "sm3.h"
+#include <arm_neon.h>
+
+#define ROTL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+#define P0(x)        ((x) ^ ROTL32(x, 9)  ^ ROTL32(x, 17))
+#define P1(x)        ((x) ^ ROTL32(x, 15) ^ ROTL32(x, 23))
+
+#define FF0(x,y,z)   ((x) ^ (y) ^ (z))
+#define GG0(x,y,z)   ((x) ^ (y) ^ (z))
+#define FF1(x,y,z)   (((x) & (y)) | ((x) & (z)) | ((y) & (z)))
+#define GG1(x,y,z)   (((x) & (y)) | ((~(x)) & (z)))
+
+#define T_J0 0x79cc4519UL
+#define T_J1 0x7a879d8aUL
+
+static inline uint32x4_t vrotlq_u32(uint32x4_t x, int n)
+{
+    return vorrq_u32(vshlq_n_u32(x, n), vshrq_n_u32(x, 32 - n));
+}
+
+static inline uint32x4_t vP1_u32(uint32x4_t x)
+{
+    uint32x4_t x15 = vrotlq_u32(x, 15);
+    uint32x4_t x23 = vrotlq_u32(x, 23);
+    return veorq_u32(veorq_u32(x, x15), x23);
+}
+
+static inline uint32x4_t sm3_neon_expand4(
+    uint32x4_t w0_3, uint32x4_t w3_6,
+    uint32x4_t w6_9, uint32x4_t w9_12,
+    uint32x4_t w12_15)
+{
+    uint32x4_t wj3_rot15 = vrotlq_u32(w9_12, 15);
+    uint32x4_t tmp = veorq_u32(w0_3, w6_9);
+    tmp = veorq_u32(tmp, wj3_rot15);
+    tmp = vP1_u32(tmp);
+
+    uint32x4_t wj13_rot7 = vrotlq_u32(w3_6, 7);
+    uint32x4_t res = veorq_u32(tmp, wj13_rot7);
+    res = veorq_u32(res, w6_9);
+    return res;
+}
+
+#define SM3_ARM_ROUND(A,B,C,D,E,F,G,H, wj, wpj, tj, idx) \
+do { \
+    uint32_t a12 = ROTL32(A, 12); \
+    uint32_t ss1 = ROTL32(a12 + E + ROTL32(tj, idx), 7); \
+    uint32_t ss2 = ss1 ^ a12; \
+    uint32_t ff = (idx < 16) ? FF0(A,B,C) : FF1(A,B,C); \
+    uint32_t gg = (idx < 16) ? GG0(E,F,G) : GG1(E,F,G); \
+    uint32_t tt1 = ff + D + ss2 + wpj; \
+    uint32_t tt2 = gg + H + ss1 + wj; \
+    D = C; C = ROTL32(B,9); B = A; A = tt1; \
+    H = G; G = ROTL32(F,19); F = E; E = P0(tt2); \
+} while(0)
+
+#define SM3_4ARM_GROUP(A,B,C,D,E,F,G,H, wbuf, wpbuf, tj, start) \
+do { \
+    SM3_ARM_ROUND(A,B,C,D,E,F,G,H, wbuf[0], wpbuf[0], tj, start+0); \
+    SM3_ARM_ROUND(D,A,B,C,H,E,F,G, wbuf[1], wpbuf[1], tj, start+1); \
+    SM3_ARM_ROUND(C,D,A,B,G,H,E,F, wbuf[2], wpbuf[2], tj, start+2); \
+    SM3_ARM_ROUND(B,C,D,A,F,G,H,E, wbuf[3], wpbuf[3], tj, start+3); \
+} while(0)
+
+void sm3_compress(uint32_t state[8], const uint8_t block[64])
+{
+    const uint8x16_t rev_mask = {3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12};
+
+    uint8x16_t raw0 = vld1q_u8(block);
+    uint8x16_t raw1 = vld1q_u8(block+16);
+    uint8x16_t raw2 = vld1q_u8(block+32);
+    uint8x16_t raw3 = vld1q_u8(block+48);
+
+    uint32x4_t w0_3   = vreinterpretq_u32_u8(vqtbl1q_u8(raw0, rev_mask));
+    uint32x4_t w4_7   = vreinterpretq_u32_u8(vqtbl1q_u8(raw1, rev_mask));
+    uint32x4_t w8_11  = vreinterpretq_u32_u8(vqtbl1q_u8(raw2, rev_mask));
+    uint32x4_t w12_15 = vreinterpretq_u32_u8(vqtbl1q_u8(raw3, rev_mask));
+
+    uint32x4_t w3_6  = vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w4_7), vreinterpretq_u8(w0_3), 12));
+    uint32x4_t w6_9  = vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w8_11), vreinterpretq_u8(w4_7), 12));
+    uint32x4_t w9_12 = vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w12_15), vreinterpretq_u8(w8_11), 12));
+
+    uint32_t A=state[0], B=state[1], C=state[2], D=state[3];
+    uint32_t E=state[4], F=state[5], G=state[6], H=state[7];
+    uint32_t w_buf[4], wp_buf[4];
+
+    for(int i=0;i<4;i++){
+        uint32x4_t w_cur,w_next;
+        switch(i){
+            case 0:w_cur=w0_3;w_next=w4_7;break;
+            case 1:w_cur=w4_7;w_next=w8_11;break;
+            case 2:w_cur=w8_11;w_next=w12_15;break;
+            default:w_cur=w12_15;w_next=vdupq_n_u32(0);break;
+        }
+        vst1q_u32(w_buf, w_cur);
+        vst1q_u32(wp_buf, veorq_u32(w_cur, w_next));
+        SM3_4ARM_GROUP(A,B,C,D,E,F,G,H, w_buf, wp_buf, T_J0, i*4);
+
+        if(i<3){
+            uint32x4_t new_w = sm3_neon_expand4(w0_3,w3_6,w6_9,w9_12,w12_15);
+            w0_3=w4_7;w4_7=w8_11;w8_11=w12_15;w12_15=new_w;
+            w3_6=vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w4_7),vreinterpretq_u8(w0_3),12));
+            w6_9=vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w8_11),vreinterpretq_u8(w4_7),12));
+            w9_12=vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w12_15),vreinterpretq_u8(w8_11),12));
+        }
+    }
+
+    for(int i=4;i<16;i++){
+        vst1q_u32(w_buf, w0_3);
+        vst1q_u32(wp_buf, veorq_u32(w0_3, w4_7));
+        SM3_4ARM_GROUP(A,B,C,D,E,F,G,H, w_buf, wp_buf, T_J1, i*4);
+
+        uint32x4_t new_w = sm3_neon_expand4(w0_3,w3_6,w6_9,w9_12,w12_15);
+        w0_3=w4_7;w4_7=w8_11;w8_11=w12_15;w12_15=new_w;
+        w3_6=vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w4_7),vreinterpretq_u8(w0_3),12));
+        w6_9=vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w8_11),vreinterpretq_u8(w4_7),12));
+        w9_12=vreinterpretq_u32_u8(vextq_u8(vreinterpretq_u8(w12_15),vreinterpretq_u8(w8_11),12));
+    }
+
+    state[0]^=A;state[1]^=B;state[2]^=C;state[3]^=D;
+    state[4]^=E;state[5]^=F;state[6]^=G;state[7]^=H;
+}

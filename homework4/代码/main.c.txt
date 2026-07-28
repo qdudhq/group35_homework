@@ -1,0 +1,82 @@
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <stdlib.h>
+#include "sm3.h"
+
+static const uint8_t test_abc_result[32] = {
+    0x66,0xc7,0xf0,0xf4,0x62,0xee,0xed,0xd9,
+    0xd1,0xf2,0xd4,0x6b,0xdc,0x10,0xe4,0xe2,
+    0x41,0x67,0xc4,0x87,0x5c,0xf2,0xf7,0xa2,
+    0x29,0x7d,0xa0,0x2b,0x8f,0x4b,0xa8,0xe0
+};
+
+void print_hex(const uint8_t *buf, size_t len)
+{
+    for(size_t i=0;i<len;i++)
+        printf("%02x", buf[i]);
+    printf("\n");
+}
+
+int test_correct()
+{
+    sm3_ctx_t ctx;
+    uint8_t hash[32];
+
+    sm3_init(&ctx);
+    sm3_final(&ctx, hash);
+    printf("空字符串SM3: ");
+    print_hex(hash, 32);
+
+    sm3_init(&ctx);
+    sm3_update(&ctx, (uint8_t*)"abc", 3);
+    sm3_final(&ctx, hash);
+    printf("\"abc\" SM3:    ");
+    print_hex(hash, 32);
+
+    if(memcmp(hash, test_abc_result, 32) == 0)
+    {
+        printf("✅ 哈希校验正确\n");
+        return 0;
+    }
+    else
+    {
+        printf("❌ 结果错误\n");
+        return -1;
+    }
+}
+
+void test_speed()
+{
+    const size_t test_size = 10 * 1024 * 1024;
+    uint8_t *data = malloc(test_size);
+    memset(data, 0x41, test_size);
+
+    sm3_ctx_t ctx;
+    clock_t start = clock();
+    sm3_init(&ctx);
+    sm3_update(&ctx, data, test_size);
+    uint8_t hash[32];
+    sm3_final(&ctx, hash);
+    clock_t end = clock();
+
+    double sec = (double)(end - start) / CLOCKS_PER_SEC;
+    double speed = 10.0 / sec;
+    printf("\n10MB性能测试：耗时%.3fs，吞吐量%.2f MB/s\n", sec, speed);
+
+    free(data);
+}
+
+int main()
+{
+#ifdef __x86_64__
+    printf("===== X86_64 AVX2 SIMD混合优化 SM3 =====\n");
+#elif __aarch64__
+    printf("===== ARM64 NEON SIMD混合优化 SM3 =====\n");
+#endif
+
+    if(test_correct() != 0)
+        return 1;
+    test_speed();
+    return 0;
+}

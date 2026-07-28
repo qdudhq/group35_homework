@@ -1,0 +1,24 @@
+CC_X86 = gcc
+CC_ARM = aarch64-linux-gnu-gcc
+CFLAGS_BASE = -O3 -Wall -g
+
+CFLAGS_X86 = $(CFLAGS_BASE) -mavx2 -msse4.1
+SRCS_X86 = sm3.c sm3_x86_avx2.c main.c
+TARGET_X86 = sm3_x86_avx2_run
+
+CFLAGS_ARM = $(CFLAGS_BASE) -march=armv8-a+simd
+SRCS_ARM = sm3.c sm3_arm64_neon.c main.c
+TARGET_ARM = sm3_arm64_neon_run
+
+all: x86 arm
+
+x86: $(TARGET_X86)
+$(TARGET_X86): $(SRCS_X86)
+	$(CC_X86) $(CFLAGS_X86) -o $@ $^
+
+arm: $(TARGET_ARM)
+$(TARGET_ARM): $(SRCS_ARM)
+	$(CC_ARM) $(CFLAGS_ARM) -o $@ $^
+
+clean:
+	rm -f $(TARGET_X86) $(TARGET_ARM) *.o
