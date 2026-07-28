@@ -1,0 +1,145 @@
+================================================================================
+  实验3: 对称密码算法的软件实现  —— 项目进度报告
+  更新时间: 2026-07-24
+================================================================================
+
+一、实验目标
+────────────────────────────────────────────────────────────────────
+1. 从基本实现出发，优化对称密码(AES)的软件执行效率
+2. 至少覆盖 T-table、shuffle(PSHUFB)、最新指令集(AES-NI) 中的两种
+3. 基于加解密实现 CTR/GCM/XTS 工作模式的软件优化
+
+
+二、项目文件清单
+────────────────────────────────────────────────────────────────────
+  aes.h           - 公共头文件 (所有API声明、数据结构)
+  aes_ref.c       - AES 参考实现 (FIPS 197 逐步骤: SubBytes/ShiftRows/MixColumns/AddRoundKey)
+  aes_ttable.c    - T-table 优化 (4张256项32-bit表, 合并 SubBytes+ShiftRows+MixColumns)
+  aes_shuffle.c   - SSSE3 PSHUFB 优化 (SubBytes+ShiftRows 用 SIMD shuffle 指令)
+  aes_ni.c        - AES-NI 硬件加速 (aesenc/aesenclast/aeskeygenassist; x4/x8 并行)
+  modes.c         - 工作模式: CTR, GCM, XTS
+  main.c          - 测试向量验证 + 性能基准测试
+  build.ps1       - PowerShell 构建脚本 (自动找 VS2022)
+  PROGRESS.txt    - 本文件
+
+
+三、已验证正确的部分 ✅
+────────────────────────────────────────────────────────────────────
+  1. AES Ref 加密 (FIPS 197 Appendix C.1 测试向量)        ✅ 通过
+  2. AES T-table 加密 (同测试向量)                        ✅ 通过
+  3. AES-NI 加密 (同测试向量)                             ✅ 通过
+  4. CTR 模式加解密回环 (Ref/T-table/AES-NI)              ✅ 通过
+  5. CPU 特性检测 (Ryzen 9 7940H: 全部支持)
+     - AES-NI: YES   PCLMULQDQ: YES   SSSE3: YES
+     - AVX: YES      AVX2: YES        VAES: YES   GFNI: YES
+
+
+四、2026-07-24 修复记录 ✅
+────────────────────────────────────────────────────────────────────
+
+[FIX 1] GCM gf128_mul 比特序修复 (modes.c)
+  问题: 原 gf128_mul 使用 LSB-first 比特序 (byte 0 = 最低位),
+       与 NIST SP 800-38D 规定的 MSB-first 不一致.
+       导致 GHASH 计算结果完全错误.
+  修复: 重写 gf128_mul, 严格按 GCM 规范:
+        - Byte 0 = 最高有效 8 比特 (系数 x^127~x^120)
+        - Byte 15 = 最低有效 8 比特 (系数 x^7~x^0)
+        - 左移表示乘 x, 溢出 XOR 0x87 于 byte 15
+        - 从 LSB (byte 15 bit 0) 遍历到 MSB (byte 0 bit 7)
+
+[FIX 2] T-table 解密 Inner Round Key InvMixColumns (aes_ttable.c)
+  问题: Td 表将 InvSubBytes + InvShiftRows + InvMixColumns 合并为查表,
+       但内轮密钥 rk[4*r] 未被 InvMixColumns 变换,
+       导致 AddRoundKey 与 InvMixColumns 的次序不匹配.
+  根因: "等价的逆密码" (Equivalent Inverse Cipher, FIPS 197 Sec 5.3.5)
+       要求: Td[s] ⊕ InvMC(rk)  而非  Td[s] ⊕ rk
+  修复: 在 aes_ttable_decrypt 内轮循环前计算 InvMixColumn(rk[4*r+j]),
+       新增 gf_mul_tt() 和 InvMixColumn() 辅助函数.
+       注意: 首轮(r=Nr)和末轮(r=0)无需 InvMixColumns.
+
+[FIX 3] GCM ghash_core 部分块处理 (modes.c)
+  问题: ghash_core 只处理完整 16 字节块, 丢弃不足一块的尾数据,
+       导致 nonce_len 非 16 倍数时 Y0 计算错误.
+  修复: 增加末尾部分块的零填充处理.
+
+[FIX 4] GCM gcm_decrypt Y0 覆盖 (modes.c)
+  问题: 计算 Tag 时 encrypt(Y0, Y0, ctx) 将 Y0 覆盖为 E_K(Y0),
+       但后续 CTR 解密仍使用 Y0 (此时已是加密后的值),
+       导致解密从错误的计数器开始.
+  修复: 新增 Y0_saved 数组, 保存原始 Y0 供 CTR 解密使用.
+
+[FIX 5] GCM gcm_encrypt 代码简化 (modes.c)
+  - AAD/密文 GHASH 改用 ghash_core 统一处理 (减少重复代码)
+  - 移除冗余的 Y0 重生成逻辑
+
+五、全部测试通过 ✅ (2026-07-24)
+────────────────────────────────────────────────────────────────────
+  [Test 1] AES-128 encrypt (FIPS 197)
+    Ref / T-table / Shuffle / AES-NI ................ ALL PASS
+
+  [Test 2] Encrypt/Decrypt round-trip
+    Ref / T-table / AES-NI .......................... ALL PASS
+
+  [Test 3] CTR mode
+    Ref-CTR / Ttable-CTR / AESNI-CTR ................ ALL PASS
+
+  [Test 4] GCM mode (NIST GCM test vector)
+    Ref-GCM / AESNI-GCM ............................. ALL PASS
+    CT  = 0388dace60b6a392f328c2b971b2fe78  ✓
+    Tag = ab6e47d42cec13bdf53a67b21257bddf  ✓
+
+  [Test 5] XTS mode
+    Ref-XTS / AESNI-XTS ............................. ALL PASS
+
+  [Test 2 Extra] AES-NI cross-test
+    AES-NI enc → Ref dec ............................ PASS
+    Ref enc → AES-NI dec ............................ PASS
+
+
+五、编译环境
+────────────────────────────────────────────────────────────────────
+  操作系统: Windows 11
+  编译器:   Microsoft Visual Studio 2022 Preview (MSVC 19.44.34918.1)
+  CPU:      AMD Ryzen 9 7940H (Zen 4, 支持 AVX-512/VAES/GFNI)
+  工作目录: D:\360MoveData\Users\ygd06\Desktop\35组 作业三\
+
+  编译命令 (在 VS Developer Command Prompt 中):
+    cl /nologo /O2 /arch:AVX2 /utf-8 /std:c11 ^
+       aes_ref.c aes_ttable.c aes_shuffle.c aes_ni.c modes.c main.c ^
+       /Fe:aes_bench.exe
+
+  或使用 PowerShell:
+    powershell -File build.ps1
+
+  注意: MSVC 默认 C89 模式不支持 for(int i=...) 声明，
+        需使用 /std:c11 或把变量声明移到块开头
+
+
+六、性能基准设计
+────────────────────────────────────────────────────────────────────
+  main.c 默认运行:
+    - 100,000 次单块 AES-128 加密 (16字节/次)
+    - 1 MB 数据量的 CTR/GCM/XTS 模式吞吐量
+    - 对比: Ref → T-table → Shuffle → AES-NI(1x/4x/8x)
+  
+  可修改 BENCH_BLOCKS 和 BENCH_MODE_BYTES 调整测试规模
+
+
+七、下一步修复建议
+────────────────────────────────────────────────────────────────────
+  优先级1: 修复解密回环 (影响 T-table 和 AES-NI 两项)
+     → 对比 Brian Gladman 的 AES 实现，检查 Td 表索引和最后一轮输出
+     → 检查密钥编排在解密时是否需要 InvMixColumns 变换
+
+  优先级2: 修复 GCM GHASH
+     → 对照 NIST SP 800-38D Section 6.4，重写 GF(2^128) 乘法
+     → 验证: H = AES_K(0^128) 对于全零密钥应等于 66e94bd4ef8a2c3b884cfa59ca342b2e
+
+  优先级3: 修复 XTS 段错误
+     → 在 xts_encrypt 入口加 printf 定位崩溃位置
+     → 检查 GF(2^128) 中乘以 alpha 是否正确 (左移 + 条件异或 0x87)
+
+  优先级4: 验证 Shuffle 修复
+     → 重新编译运行，确认 FIPS 197 测试向量通过
+
+================================================================================

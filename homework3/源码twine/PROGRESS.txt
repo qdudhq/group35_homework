@@ -1,0 +1,21 @@
+================================================================================
+  TWINE-128 Software Optimization - Experiment 3
+================================================================================
+
+Files:
+  twine.h          - Common header
+  twine_ref.c      - Reference (Suzaki et al., SAC 2011)
+  twine_ttable.c   - T-table (S-box precomputed)
+  twine_shuffle.c  - SSSE3 PSHUFB (nibble-split S-box)
+  twine_bitslice.c - Bitslice (SSSE3)
+  twine_avx2.c     - AVX2 x4/x8 parallel
+  twine_modes.c    - CTR/GCM/XTS (adapted for 64-bit block)
+  twine_main.c     - Tests + benchmarks (adapted)
+  build.ps1        - Build script (MSVC)
+
+TWINE-128: 64-bit block, 128-bit key, 36 rounds
+Type-2 Generalized Feistel Network (16 x 4-bit branches)
+
+Methods: T-table, SSSE3 PSHUFB, Bitslice(SSSE3), AVX2
+Modes: CTR, GCM, XTS
+================================================================================

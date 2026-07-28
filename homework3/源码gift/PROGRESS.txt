@@ -1,0 +1,21 @@
+================================================================================
+  GIFT-128 Software Optimization - Experiment 3
+================================================================================
+
+Files:
+  gift.h          - Common header
+  gift_ref.c      - Reference (Banik et al., CHES 2017)
+  gift_ttable.c   - T-table (32x16x16 precomputed tables)
+  gift_shuffle.c  - SSSE3 PSHUFB (nibble-split S-box)
+  gift_bitslice.c - Bitslice implementation (SSSE3)
+  gift_avx2.c     - AVX2 x4/x8 parallel
+  gift_modes.c    - CTR/GCM/XTS (adapted)
+  gift_main.c     - Tests + benchmarks (adapted)
+  build.ps1       - Build script (MSVC)
+
+GIFT-128: 128-bit block, 128-bit key, 40 rounds
+SPN: SubCells (4-bit S-box) + PermBits + AddRoundKey + AddConstants
+
+Methods: T-table, SSSE3 PSHUFB, Bitslice(SSSE3), AVX2
+Modes: CTR, GCM, XTS
+================================================================================

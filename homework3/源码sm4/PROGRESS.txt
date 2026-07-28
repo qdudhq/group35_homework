@@ -1,0 +1,30 @@
+================================================================================
+  SM4 Software Optimization - Experiment 3
+================================================================================
+
+Files:
+  sm4.h          - Common header (API, types, constants)
+  sm4_ref.c      - Reference implementation (GM/T 0002-2012)
+  sm4_ttable.c   - T-table optimization (4x256 uint32_t tables)
+  sm4_shuffle.c  - SSSE3 PSHUFB optimization (nibble-split S-box)
+  sm4_ni.c       - SM4-NI / SSE4.1 SIMD acceleration
+  sm4_avx2.c     - AVX2 parallel (x4/x8 blocks)
+  sm4_modes.c    - CTR, GCM, XTS work modes
+  sm4_main.c     - Test vectors + performance benchmarks
+  build.ps1      - Build script for MSVC
+
+Test vector: GM/T 0002-2012 Appendix A
+  Key: 0123456789abcdeffedcba9876543210
+  PT:  0123456789abcdeffedcba9876543210
+  CT:  681edf34d206965e86b3e94f536e4246
+
+Optimization methods:
+  1. T-table: combine S-box + L transformation into 4 lookup tables (4KB)
+  2. SSSE3 PSHUFB: nibble-split technique for parallel S-box lookup
+  3. SM4-NI / SSE4.1: SIMD-accelerated round function using XMM registers
+  4. AVX2 parallel: x4 and x8 block parallel processing
+
+Work modes: CTR, GCM, XTS
+
+Build: powershell -File build.ps1 (requires VS 2022)
+================================================================================

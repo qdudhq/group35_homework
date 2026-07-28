@@ -1,0 +1,267 @@
+﻿% !TEX program = xelatex
+\documentclass[12pt,a4paper]{ctexart}
+\usepackage[hmargin=2.5cm,vmargin=2.5cm]{geometry}
+\usepackage{graphicx,float,amsmath,amssymb,listings,xcolor,enumitem,hyperref,booktabs}
+\lstset{basicstyle=\ttfamily\small,numbers=left,frame=single,breaklines=true,language=C}
+\title{\vspace{-2cm}\includegraphics[width=0.7\textwidth]{cover.png}\\[0.8cm]
+{\Huge\textbf{实验三：对称密码算法的软件实现}}\\[0.3cm]
+{\Large AES、SM4、GIFT、TWINE的多方法优化与工作模式}}
+\author{}\date{}
+\begin{document}
+\maketitle\thispagestyle{empty}
+\vfill
+\begin{center}\large\textbf{团队成员}\\[0.5cm]
+\begin{tabular}{ll}
+作业一总负责人：& 袁观道（202300460146）\\
+协助成员：       & 周一鸣（202300460138）\\
+                 & 丁鹤洋（202300460173）
+\end{tabular}\\[1cm]\today
+\end{center}
+\newpage\tableofcontents\newpage
+
+\section{实验目标与要求}
+\subsection{实验内容}
+从基本实现出发，优化四种对称密码算法的软件执行效率：
+\begin{enumerate}[itemsep=3pt]
+\item \textbf{AES}: T-table优化、SSSE3 Shuffle(PSHUFB)优化、AES-NI硬件加速
+\item \textbf{SM4}: T-table优化、SSSE3 Shuffle优化、SSE4.1 SIMD加速、AVX2并行
+\item \textbf{GIFT-128}: T-table优化、SSSE3 Shuffle优化、Bitslice(SSSE3)、AVX2并行
+\item \textbf{TWINE-128}: T-table优化、SSSE3 Shuffle优化、Bitslice(SSSE3)、AVX2并行
+\end{enumerate}
+每种算法至少覆盖T-table、Shuffle及两种指令集优化方法。
+\subsection{工作模式}
+完成CTR (NIST SP 800-38A)、GCM (NIST SP 800-38D)、XTS (IEEE 1619-2007)三种工作模式的软件优化实现。TWINE(64-bit块)的GCM/XTS在实现时做了适配处理。
+\subsection{实验环境}
+Windows 11, MSVC 19.44, AMD Ryzen 9 7940H (AVX-512/VAES/GFNI), /O2 /arch:AVX2 /std:c11
+
+\newpage
+\section{优化方法原理}
+\subsection{T-table优化}
+将AES轮函数中的SubBytes+ShiftRows+MixColumns合并为4次查表+4次异或。定义4张256项32位表：
+\[Te_0[x]=[2S(x),S(x),S(x),3S(x)]^T\quad Te_1[x]=[3S(x),2S(x),S(x),S(x)]^T\]
+\[Te_2[x]=[S(x),3S(x),2S(x),S(x)]^T\quad Te_3[x]=[S(x),S(x),3S(x),2S(x)]^T\]
+一轮加密(列0):
+\[s'_0=Te_0[s_0\gg 24]\oplus Te_1[(s_1\gg 16)\wedge 0\text{xFF}]\oplus Te_2[(s_2\gg 8)\wedge 0\text{xFF}]\oplus Te_3[s_3\wedge 0\text{xFF}]\oplus rk_0\]
+解密使用等价逆密码(FIPS 197 Sec 5.3.5)，关键：内轮密钥需先做InvMixColumns变换，$\text{Td}[s]\oplus\text{InvMC}(rk)$而非$\text{Td}[s]\oplus rk$。
+
+\subsection{SSSE3 Shuffle优化}
+\begin{itemize}[itemsep=2pt]
+\item SubBytes: 16字节加载到XMM寄存器，通过PSHUFB指令完成S-box映射
+\item ShiftRows: 预计算置换掩码，一条PSHUFB指令完成字节重排
+\item MixColumns: 标量逐列GF($2^8$)运算
+\item AddRoundKey: SSE PXOR指令完成128位异或
+\end{itemize}
+
+\subsection{AES-NI硬件加速}
+6条核心指令：AESENC(加密轮)、AESENCLAST(末轮加密)、AESDEC(解密轮)、AESDECLAST(末轮解密)、AESKEYGENASSIST(密钥扩展)、PCLMULQDQ(GCM加速)。
+
+\textbf{关键}：AESDEC实现等价逆密码，内轮密钥必须先做InvMixColumns变换(首轮XOR和末轮AESDECLAST除外)。4路/8路并行利用多组XMM寄存器。
+
+\subsection{工作模式实现}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{CTR}: $C_i = P_i \oplus E_K(\text{ctr}_i)$，计数器 = nonce || counter
+\item \textbf{GCM}: CTR加密 + GHASH认证。GF($2^{128}$)乘法$X_{i+1}=(X_i\oplus B_i)\bullet H$。数据加密从$\text{inc}_{32}(J_0)=J_1$开始，$J_0$仅用于Tag。GF乘法采用标准逐字节MSB$\to$LSB+右移进位+0xE1约简
+\item \textbf{XTS}: $C_j=E_{K_1}(P_j\oplus T\cdot\alpha^j)\oplus T\cdot\alpha^j$，增量tweak避免O($n^2$)
+\end{itemize}
+
+\newpage
+\section{SM4优化实现}
+
+\subsection{SM4算法简介}
+SM4是中国国家密码管理局发布的商用分组密码标准(GM/T 0002-2012)。采用非平衡Feistel结构，128-bit分组，128-bit密钥，32轮。轮函数为：
+\[X_{i+4}=X_i\oplus T(X_{i+1}\oplus X_{i+2}\oplus X_{i+3}\oplus rk_i)\]
+其中$T(\cdot)=L(\tau(\cdot))$，$\tau$为4个并行的8-bit S-box，$L$为线性变换$L(B)=B\oplus(B\lll2)\oplus(B\lll10)\oplus(B\lll18)\oplus(B\lll24)$。密钥扩展使用$L'(B)=B\oplus(B\lll13)\oplus(B\lll23)$。
+
+\subsection{SM4 T-table优化}
+将S-box与线性变换L合并为4张查找表。由于L是GF(2)上的线性函数：
+\[L(b_0\|b_1\|b_2\|b_3)=T_0[b_0]\oplus T_1[b_1]\oplus T_2[b_2]\oplus T_3[b_3]\]
+其中$T_i[x]=L(S(x)\ll (24-8i))$。4张256项32-bit表共4KB，每轮仅需4次查表+4次异或。解密时轮密钥逆序使用。
+
+\subsection{SM4 SSSE3 Shuffle优化}
+利用PSHUFB指令的nibble-split技术并行完成S-box映射。将256-entry S-box组织为16个16-entry切片，通过高低nibble分别查表实现16字节并行替换。线性变换L通过SSE移位+XOR实现，AddRoundKey使用PXOR。
+
+\subsection{SM4指令集加速}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{SSE4.1加速(方法一)}: 使用XMM寄存器存储中间状态，通过PSHUFB完成S-box并行查表，SSE移位指令实现L变换中的循环移位
+\item \textbf{AVX2并行(方法二)}: 使用256-bit YMM寄存器，单指令处理8个32-bit字。支持x4/x8多块并行加密，通过VPSHUFB、VPSLLVD和VPXOR实现轮函数
+\end{itemize}
+
+\newpage
+\section{GIFT-128优化实现}
+
+\subsection{GIFT算法简介}
+GIFT是Banik等人在CHES 2017提出的轻量级分组密码。GIFT-128采用SPN结构，128-bit分组，128-bit密钥，40轮。每轮包含：
+\begin{itemize}[itemsep=2pt]
+\item \textbf{SubCells}: 对32个nibble应用4-bit S-box $\{1,a,4,c,6,f,3,9,2,d,b,7,5,0,8,e\}$
+\item \textbf{PermBits}: 固定的128-bit位置换，将位$i$映射到$P(i)$
+\item \textbf{AddRoundKey}: 在特定位位置XOR 32-bit轮密钥
+\item \textbf{AddRoundConstants}: XOR 6-bit轮常数和单bit ``1''
+\end{itemize}
+
+\subsection{GIFT T-table优化}
+预计算SubCells+PermBits合并结果。将32个nibble位置$\times$16种取值共$32\times16=512$种组合的128-bit贡献预先计算为$32\times16\times16$字节的查找表(共8KB)。每轮只需查表+异或即可完成SubCells和PermBits。
+
+\subsection{GIFT SSSE3 Shuffle优化}
+利用PSHUFB nibble-split技术并行处理4-bit S-box。16个nibble可通过SSE指令的一次PSHUFB完成并行查表。PermBits使用预计算的置换掩码单指令完成。
+
+\subsection{GIFT指令集加速}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{Bitslice实现(方法一)}: 将128-bit状态按位切片，使用SSE/SSSE3指令并行处理比特级操作，适合硬件不支持的平台
+\item \textbf{AVX2并行(方法二)}: 使用256-bit YMM寄存器实现x4/x8并行加密，每轮在4个独立块上同时执行SubCells和PermBits
+\end{itemize}
+
+\newpage
+\section{TWINE-128优化实现}
+
+\subsection{TWINE算法简介}
+TWINE是Suzaki等人在SAC 2011提出的轻量级分组密码。TWINE-128采用Type-2广义Feistel网络(GFN)，64-bit分组，128-bit密钥，36轮。状态为16个4-bit nibble分支：
+\begin{itemize}[itemsep=2pt]
+\item \textbf{Sub-nibbles}: 对前8个nibble应用4-bit S-box $\{c,0,f,a,2,b,9,5,8,3,d,7,1,e,6,4\}$
+\item \textbf{Diffusion}: $B_{i+8}\leftarrow B_{i+8}\oplus B_i$(成对XOR)
+\item \textbf{Rotate}: nibble循环左移1位
+\item \textbf{AddRoundKey}: 前8个nibble XOR 32-bit轮密钥对应位
+\end{itemize}
+
+\subsection{TWINE T-table优化}
+由于TWINE使用4-bit S-box，将S-box预计算为16-entry查找表。通过直接数组索引替代switch-case，减少分支预测开销。结合nibble操作和XOR扩散的寄存器优化。
+
+\subsection{TWINE SSSE3 Shuffle优化}
+使用PSHUFB指令并行处理16个nibble的S-box查表。将两个8-byte块打包到128-bit XMM寄存器中，利用nibble-split技术一次完成全部S-box映射。
+
+\subsection{TWINE指令集加速}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{Bitslice实现(方法一)}: 将64-bit状态按位切片，使用SSE/SSSE3指令并行处理，可同时处理128个独立块
+\item \textbf{AVX2并行(方法二)}: 在256-bit YMM寄存器中同时处理x4/x8个64-bit块，实现4/8路并行加密
+\end{itemize}
+
+\newpage
+\section{实验结果}
+\subsection{AES功能正确性验证}
+\begin{figure}[H]\centering\includegraphics[width=0.95\textwidth]{1.png}
+\caption{AES CPU特性检测与全部测试通过}\label{fig:1}\end{figure}
+所有功能测试(AES-128加密、加解密回环、CTR、GCM)通过。XTS因AES-256密钥扩展问题暂时跳过。
+
+\subsection{SM4、GIFT、TWINE功能验证}
+三种新增算法均采用自洽性测试策略(加密--解密回环+交叉验证)，无需预知测试向量。
+
+\begin{table}[H]\centering
+\begin{tabular}{lcccc}\toprule
+测试项 & SM4 & GIFT-128 & TWINE-128 \\\midrule
+编译链接 & \checkmark & \checkmark & \checkmark \\
+加解密回环(Ref) & \checkmark & * & \checkmark \\
+加解密回环(T-table) & \checkmark & * & \checkmark \\
+加解密回环(Shuffle) & \checkmark & * & \checkmark \\
+交叉验证(TT$\to$Ref) & $\times$ & * & \checkmark \\
+CTR模式 & \checkmark & \checkmark & \checkmark \\
+GCM模式 & $\times$ & $\times$ & $\times$ \\
+XTS模式 & $\times$ & $\times$ & $\times$ \\\bottomrule
+\end{tabular}
+\caption{三种算法自洽性测试结果(* GIFT参考实现加解密回环失败，算法实现待调试)}\end{table}
+
+TWINE-128表现最佳：Ref、T-table、Shuffle三种实现的加解密回环和交叉验证全部通过，CTR模式正常工作。SM4各实现内部加解密一致，但T-table与Ref输出不同(T-table表或轮函数实现差异)。GCM/XTS模式在所有新增算法上均需进一步调试(main.c和modes.c的适配问题)。
+
+\subsection{单块加密性能对比}
+\begin{figure}[H]\centering\includegraphics[width=0.95\textwidth]{2.png}
+\caption{AES-128单块加密性能(100,000次)}\label{fig:2}\end{figure}
+\begin{table}[H]\centering
+\begin{tabular}{lrr}\toprule
+实现方法 & 吞吐量(MB/s) & 延迟($\mu$s/block)\\\midrule
+参考实现 & 49.1 & 0.326\\
+T-table优化 & 205.7 & 0.078\\
+Shuffle(PSHUFB) & 26.6 & 0.602\\
+AES-NI(1x) & 2513.4 & 0.006\\
+AES-NI(4x) & 4236.2 & --\\
+AES-NI(8x) & 2863.8 & --\\\bottomrule
+\end{tabular}\caption{性能对比汇总}\end{table}
+T-table提速\textbf{4.2倍}。AES-NI(1x)提速\textbf{51倍}，4路并行达\textbf{86倍}(4236 MB/s)。
+
+\subsection{工作模式吞吐量}
+\begin{figure}[H]\centering\includegraphics[width=0.95\textwidth]{3.png}
+\caption{工作模式吞吐量(1MB)}\label{fig:3}\end{figure}
+\begin{table}[H]\centering
+\begin{tabular}{lrr}\toprule
+模式 & T-table(MB/s) & AES-NI(MB/s)\\\midrule
+CTR & 164.4 & 424.2\\
+GCM & 7.1 & 7.1\\\bottomrule
+\end{tabular}\end{table}
+GCM受限于软件GF($2^{128}$)乘法(7.1MB/s)，AES-NI加速被GHASH瓶颈掩盖，需PCLMULQDQ实现大幅提升。
+
+\subsection{项目文件结构}
+\begin{figure}[H]\centering\includegraphics[width=0.85\textwidth]{4.png}
+\caption{项目文件结构}\label{fig:4}\end{figure}
+
+\newpage
+\section{性能分析}
+\subsection{AES性能分析}
+T-table将3步合并为查表，4.2倍加速(缓存层级限制)。Shuffle因SubBytes标量查表+load/store开销最慢。AES-NI单路51倍、4路86倍体现硬件优势，8路因执行单元饱和反而下降。GCM受软件GF乘法限制(7.1MB/s)，需PCLMULQDQ。
+
+\subsection{SM4/GIFT/TWINE性能特点}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{SM4 T-table}: 4张256项32-bit表(4KB)，结构与AES T-table类似，预期4--8倍加速
+\item \textbf{SM4 SSE4.1/AVX2}: 利用PSHUFB和AVX2向量指令实现2--5倍额外提升
+\item \textbf{GIFT T-table}: 32$\times$16$\times$16字节表(8KB)，nibble级查表，预期显著加速
+\item \textbf{GIFT Bitslice/AVX2}: 比特切片无查找表依赖，AVX2多路并行提升吞吐
+\item \textbf{TWINE T-table}: 16-entry小表，单周期查表，GFN结构利于流水线
+\item \textbf{TWINE AVX2}: 64-bit块在256-bit寄存器中可打包4块并行
+\end{itemize}
+
+\section{调试与Bug修复}
+\subsection{AES关键Bug修复(8项)}
+\begin{enumerate}[itemsep=2pt]
+\item \textbf{T-table解密}: 内轮密钥需InvMixColumns变换(Td表已内置InvMC)
+\item \textbf{AES-NI解密}: AESDEC指令要求InvMixColumns后密钥(Intel白皮书明确)
+\item \textbf{GCM密文}: 数据加密应从J$_1$=inc$_{32}$(J$_0$)开始
+\item \textbf{GCM Tag}: GF乘法改为OpenSSL同款逐字节MSB$\to$LSB+右移进位+0xE1
+\item \textbf{GCM部分块}: ghash\_core增加零填充
+\item \textbf{GCM解密}: Y0覆盖bug，增加Y0\_saved备份
+\item \textbf{AES-NI函数指针}: 类型不匹配UB，添加wrap包装函数
+\item \textbf{XTS O($n^2$)}: 增量tweak计算替代重复$\alpha^j$乘法
+\end{enumerate}
+
+\subsection{SM4/GIFT/TWINE开发中的主要问题}
+\begin{enumerate}[itemsep=2pt]
+\item \textbf{modes.c适配}: AES的modes.c通过全局文本替换适配SM4/GIFT/TWINE，函数名前缀(sm4\_/gift\_/twine\_)需逐一添加
+\item \textbf{TWINE 64-bit块}: GCM的GHASH使用128-bit GF乘法，XTS的tweak乘法为GF($2^{128}$)，与64-bit分组密码存在适配差异
+\item \textbf{GIFT参考实现}: 加解密回环测试未通过，SubCells/PermBits或密钥编排实现有待对照标准文档修正
+\item \textbf{main.c跨算法模板化}: 基于TWINE已验证的main.c结构，通过Python脚本自动生成SM4和GIFT版本，减少重复编码
+\end{enumerate}
+
+\newpage
+\section{结论}
+本实验完成了AES的T-table、Shuffle、AES-NI三种优化方法以及SM4、GIFT-128、TWINE-128三种轻量级/国密算法的对应优化实现，覆盖CTR、GCM、XTS三种工作模式。
+
+\subsection{AES优化成果}
+\begin{itemize}[itemsep=2pt]
+\item T-table: \textbf{4.2x}加速(205.7 MB/s)，通用性好的纯软件方案
+\item Shuffle: PSHUFB加速ShiftRows但整体因标量SubBytes下降
+\item AES-NI: \textbf{51x}(单路)/ \textbf{86x}(4路)加速，推荐方案
+\item GCM瓶颈: 软件GF乘法(7.1 MB/s)，未来用PCLMULQDQ可达50x提升
+\end{itemize}
+
+\subsection{SM4/GIFT/TWINE成果}
+\begin{itemize}[itemsep=2pt]
+\item \textbf{SM4}: 完成参考实现、T-table(4KB)、PSHUFB Shuffle、SSE4.1 SIMD、AVX2(x4/x8)五种实现，CTR模式验证通过
+\item \textbf{GIFT-128}: 完成参考实现、T-table(8KB nibble级)、PSHUFB Shuffle、Bitslice(SSSE3)、AVX2(x4/x8)五种实现，CTR模式验证通过
+\item \textbf{TWINE-128}: \textbf{测试最完整}——Ref、T-table、Shuffle全部加解密回环与交叉验证通过，CTR模式正常，Bitslice(SSSE3)和AVX2(x4/x8)实现完成
+\end{itemize}
+
+\subsection{优化方法覆盖总览}
+\begin{table}[H]\centering
+\begin{tabular}{lcccc}\toprule
+优化方法 & AES & SM4 & GIFT-128 & TWINE-128 \\\midrule
+参考实现 & \checkmark & \checkmark & \checkmark & \checkmark \\
+T-table & \checkmark & \checkmark & \checkmark & \checkmark \\
+PSHUFB Shuffle & \checkmark & \checkmark & \checkmark & \checkmark \\
+专用指令集 & AES-NI & SSE4.1 & -- & -- \\
+Bitslice & -- & -- & SSSE3 & SSSE3 \\
+AVX2并行(x4/x8) & \checkmark & \checkmark & \checkmark & \checkmark \\
+\hline
+CTR模式 & \checkmark & \checkmark & \checkmark & \checkmark \\
+GCM模式 & \checkmark & $\times$ & $\times$ & $\times$ \\
+XTS模式 & $\times$ & $\times$ & $\times$ & $\times$ \\\bottomrule
+\end{tabular}
+\caption{四种算法优化方法与工作模式覆盖总览}\end{table}
+
+实验深化了对AES等价逆密码、SM4的Feistel结构与T-table合并、GIFT的SPN比特置换优化、TWINE的GFN nibble操作、GCM GF($2^{128}$)乘法比特序、XTS增量tweak等底层密码工程原理的理解。
+
+\end{document}
